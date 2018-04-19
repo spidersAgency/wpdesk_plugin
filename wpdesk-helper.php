@@ -1,0 +1,724 @@
+<?php
+/*
+	Plugin Name: WP Desk Helper
+	Plugin URI: https://www.wpdesk.net/
+	Description: Enables WP Desk plugin activation and updates.
+	Version: 1.4
+	Author: WP Desk
+	Text Domain: wpdesk-helper
+	Domain Path: /languages/
+	Author URI: https://www.wpdesk.net/
+	Requires at least: 4.5
+	Tested up to: 4.9.4
+	WC requires at least: 2.6.14
+	WC tested up to: 3.3
+*/
+
+
+$wpdesk_helper_software_version = '1.4';
+
+if (!defined('ABSPATH')) exit; // Exit if accessed directly
+
+
+if (!class_exists('inspire_Plugin4')) {
+	require_once('classes/inspire/plugin4.php');
+}
+
+require_once( 'classes/class-wc-api-manager.php' );
+require_once( 'inc/wpdesk-logger.php' );
+require_once( 'inc/wpdesk-tracker/class-wpdesk-tracker.php' );
+
+
+if ( ! class_exists( 'WPDesk_Helper' ) ) :
+
+	class WPDesk_Helper extends inspire_Plugin4 {
+
+        private $script_version = '2';
+
+		protected $_pluginNamespace = 'wpdesk_helper';
+
+		protected static $instance;
+
+		protected $upgrade_url = 'https://www.wpdesk.pl';
+
+		protected $upgrade_url_pl = 'https://www.wpdesk.pl';
+		protected $upgrade_url_net = 'https://www.wpdesk.net';
+
+		protected $updater = null;
+
+		protected $plugins = array();
+
+		public function __construct() {
+
+			parent::__construct();
+
+			$this->init();
+
+			$this->wpdesk_helper_updater();
+
+			add_action( 'admin_menu', array( $this, 'admin_menu' ), 1 );
+
+			add_action( 'admin_notices', array( $this, 'wpdesk_message' ) );
+			add_action( 'admin_head', array($this, 'admin_head'), 999 );
+			add_action( 'wp_ajax_wpdesk_api_hide_message', array( &$this, 'api_hide_message' ) );
+
+			add_action( 'admin_enqueue_scripts', array( $this, 'css_scripts' ), 100 );
+
+			add_action( 'admin_init', array( $this, 'admin_init' ) ) ;
+
+			add_filter( 'wpdesk_tracker_notice_screens', array( $this, 'wpdesk_tracker_notice_screens' ) );
+
+		}
+
+		public function init() {
+			global $wpdesk_helper_plugins;
+
+			if ( ! isset( $wpdesk_helper_plugins ) ) {
+				$wpdesk_helper_plugins = array();
+			}
+
+			foreach ( $wpdesk_helper_plugins as $key => $wpdesk_helper_plugin ) {
+				$config_uri = null;
+				if ( isset( $wpdesk_helper_plugin['config_uri'] ) ) {
+					$config_uri = $wpdesk_helper_plugin['config_uri'];
+				}
+				$menu_title = $wpdesk_helper_plugin['product_id'];
+				if ( isset( $wpdesk_helper_plugin['title'] ) ) {
+					$menu_title = $wpdesk_helper_plugin['title'];
+				}
+				$wpdesk_helper_plugins[$key]['api_manager'] = new WPDesk_API_Manager(
+						$upgrade_url = $this->upgrade_url,
+						$version = $wpdesk_helper_plugin['version'],
+						$name = $wpdesk_helper_plugin['plugin'],
+						$product_id = $wpdesk_helper_plugin['product_id'],
+						$menu_title,
+						$title = $menu_title,
+						$plugin_file =  basename($wpdesk_helper_plugin['plugin']),
+						$plugin_dir = dirname($wpdesk_helper_plugin['plugin']),
+						$config_uri
+						);
+				$wpdesk_helper_plugins[$key]['activation_status'] = get_option( $wpdesk_helper_plugins[$key]['api_manager']->activated_key, 'Deactivated' );
+			}
+
+		}
+
+		public function linksFilter( $links ) {
+		    $docs_link = get_locale() === 'pl_PL' ? 'https://www.wpdesk.pl/docs/licencje-wtyczek/' : 'https://www.wpdesk.net/docs/activate-wp-desk-plugin-licenses/';
+            $support_link = get_locale() === 'pl_PL' ? 'https://www.wpdesk.pl/support/' : 'https://www.wpdesk.net/support';
+
+            $plugin_links = array(
+                '<a href="' . admin_url( 'admin.php?page=wpdesk-licenses') . '">' . __( 'Settings', 'wpdesk-helper' ) . '</a>',
+                '<a href="' . $docs_link . '">' . __( 'Docs', 'wpdesk-helper' ) . '</a>',
+                '<a href="' . $support_link . '">' . __( 'Support', 'wpdesk-helper' ) . '</a>',
+            );
+
+            return array_merge( $plugin_links, $links );
+		}
+
+		public function initBaseVariables() {
+			parent::initBaseVariables();
+		}
+
+        public function loadPluginTextDomain() {
+        	parent::loadPluginTextDomain();
+            load_plugin_textdomain( 'wpdesk-helper', FALSE, basename( dirname( __FILE__ ) ) . '/languages/' );
+        }
+
+		public static function getTextDomain() {
+			return 'wpdesk-helper';
+		}
+
+		public static function WPDesk_Helper() {
+			if (self::$instance === null) {
+				self::$instance = new self();
+			}
+			return self::$instance;
+		}
+
+		public function admin_menu() {
+			global $wpdesk_helper_plugins;
+
+			$counter = '';
+			$wpdesk_data = array();
+			try {
+				$wpdesk_data = $this->wpdesk_api_get_plugins();
+			}
+			catch ( Exception $e ) {
+
+            }
+			if (isset($wpdesk_data['message']) && $wpdesk_data['message'] != '') {
+				$wpdesk_api_message_close = get_option('wpdesk_api_message_close','0');
+				if (md5($wpdesk_data['message']) != $wpdesk_api_message_close) {
+					$counter = " <span id='wpdesk_helper_message_counter' class='wpdesk-update-plugins update-plugins count-1' title=''><span class='update-count'>1</span></span>";
+				}
+			}
+			$wpdesk_data = array();
+			$wpdesk_data['plugins'] = array();
+			add_menu_page('WP Desk', 'WP Desk'.$counter , 'manage_options', 'wpdesk-helper', array($this,'wpdesk_page'), 'dashicons-controls-play', 99.99941337);
+			add_submenu_page( 'wpdesk-helper',
+					__( 'Licenses', 'wpdesk-helper' ),
+					__( 'Licenses', 'wpdesk-helper' ),
+					'manage_options',
+					'wpdesk-licenses',
+					array( $this, 'wpdesk_licenses')
+					);
+			add_submenu_page( 'wpdesk-helper',
+					__( 'Settings', 'wpdesk-helper' ),
+					__( 'Settings', 'wpdesk-helper' ),
+					'manage_options',
+					'wpdesk-helper-settings',
+					array( $this, 'wpdesk_helper_settings')
+					);
+		}
+
+		public function admin_init() {
+
+			register_setting( 'wpdesk_helper_options', 'wpdesk_helper_options' );
+			add_settings_section( 'wpdesk_helper_debug', __( 'Debug', 'wpdesk-helper' ), null, 'wpdesk_helper');
+			add_settings_field( 'debug_log', __( 'WP Desk Debug Log', 'wpdesk-helper' ), array( $this, 'wpdesk_helper_debug_log' ), 'wpdesk_helper', 'wpdesk_helper_debug');
+
+			if ( wpdesk_tracker_enabled() ) {
+				add_settings_section( 'wpdesk_helper_tracking', __( 'Plugin usage tracking', 'wpdesk-helper' ), null, 'wpdesk_helper' );
+				add_settings_field( 'wpdesk_tracker_agree', __( 'Allow WP Desk to track plugin usage', 'wpdesk-helper' ), array(
+					$this,
+					'wpdesk_helper_wpdesk_tracker_agree'
+				), 'wpdesk_helper', 'wpdesk_helper_tracking' );
+			}
+
+		}
+
+		function wpdesk_helper_wpdesk_tracker_agree() {
+			$options = get_option('wpdesk_helper_options', array() );
+			if ( !is_array( $options ) ) {
+				$options = array();
+			}
+			if ( empty( $options['wpdesk_tracker_agree'] ) ) {
+				$options['wpdesk_tracker_agree'] = '0';
+			}
+			?>
+            <input type="checkbox" id="wpdesk_helper_options[wpdesk_tracker_agree]" name="wpdesk_helper_options[wpdesk_tracker_agree]" value="1" <?php checked( 1, $options['wpdesk_tracker_agree'], true); ?>>
+            <label for="wpdesk_helper_options[wpdesk_tracker_agree]"><?php _e( 'Enable', 'wpdesk-helper' ); ?></label>
+            <p class="description" id="admin-email-description">
+				<?php
+    				$terms_url = get_locale() == 'pl_PL' ? 'https://www.wpdesk.pl/dane-uzytkowania/' : 'https://www.wpdesk.net/usage-tracking/';
+    				printf( __( 'No sensitive data is tracked, %sread more%s.', 'wpdesk-helper' ), '<a target="_blank" href="' . $terms_url . '">', '</a>' );
+                ?>
+            </p>
+			<?php
+		}
+
+		function wpdesk_helper_debug_log() {
+			$options = get_option('wpdesk_helper_options', array() );
+			if ( !is_array( $options ) ) {
+				$options = array();
+			}
+			if ( empty( $options['debug_log'] ) ) {
+				$options['debug_log'] = '0';
+			}
+			?>
+			<input type="checkbox" id="wpdesk_helper_options[debug_log]" name="wpdesk_helper_options[debug_log]" value="1" <?php checked( 1, $options['debug_log'], true); ?>>
+			<label for="wpdesk_helper_options[debug_log]"><?php _e( 'Enable', 'wpdesk-helper' ); ?></label>
+			<p class="description" id="admin-email-description">
+				<?php echo sprintf( __( 'Writes error log to %s.', 'wpdesk-helper' ), '<a target="_blank" href="' . content_url('uploads/wpdesk-logs/wpdesk_debug.log') . '">' . content_url('uploads/wpdesk-logs/wpdesk_debug.log') . '</a>' ); ?>
+			</p>
+			<?php
+		}
+
+		public function wpdesk_helper_settings() {
+			?>
+		    <div class="wrap">
+		    <h1><?php _e( 'WP Desk Helper Settings', 'wpdesk-helper' ); ?></h1>
+		    <form method="post" action="options.php">
+		        <?php
+		        	settings_fields('wpdesk_helper_options');
+		        	do_settings_sections('wpdesk_helper');
+		        	submit_button();
+		        ?>
+		    </form>
+			</div>
+			<?php
+		}
+
+		public function wpdesk_api_get_plugins() {
+		    if ( get_locale() != 'pl_PL' ) {
+			    $this->upgrade_url = $this->upgrade_url_net;
+            }
+            $transient_name = 'wpdesk_api_response' . get_locale();
+			$ret = get_transient( $transient_name );
+			if (isset($_GET['refresh'])) {
+			    delete_transient( $transient_name );
+				delete_option( 'wpdesk_api_message_close' );
+				$ret = false;
+			}
+			if ($ret === false) {
+			    $url = trailingslashit($this->upgrade_url).'?wpdesk_api=1&t=1';
+				$response = wp_remote_get( $url, array('timeout' => 30, 'sslverify' => false ));
+				if (is_wp_error($response)) {
+					throw new Exception( $response->get_error_message() );
+				}
+				if ( $response['response']['code'] != 200 ) {
+				    throw new Exception( sprintf( __( 'Invalid response from WP Desk server: %s', 'wpdesk-helper' ), $response['response']['code'] . ' - ' . $response['response']['message'] ) );
+                }
+                // uncomment bellow to throw error
+                //$response['body'] = '<html><body>error</body></html>';
+				$ret = json_decode($response['body'],true);
+				if ( !$ret ) {
+				    throw new Exception( sprintf(
+			            __( '%sInvalid response: <pre>%s</pre>', 'wpdesk-helper' ),
+                        '<br/>',
+                        htmlentities($response['body'])
+                    ) );
+                }
+				set_transient( $transient_name, $ret, DAY_IN_SECONDS );
+			}
+			return $ret;
+		}
+
+		public function wpdesk_page() {
+			global $wpdesk_installed_plugins;
+			try {
+				$wpdesk_plugins         = $this->wpdesk_api_get_plugins();
+				$wp_plugins             = get_plugins();
+				$wpdesk_plugins_plugins = array();
+				foreach ( $wpdesk_plugins['plugins'] as $key => $plugin ) {
+					$found = false;
+					foreach ( $wp_plugins as $wp_key => $wp_plugin ) {
+						if ( $wp_plugin['PluginURI'] == $plugin['url'] ) {
+							$found = true;
+							break;
+						}
+					}
+					if ( $found ) {
+						$wpdesk_plugins_plugins[] = $plugin;
+						unset( $wpdesk_plugins['plugins'][ $key ] );
+					}
+				}
+				foreach ( $wpdesk_plugins_plugins as $plugin ) {
+					$wpdesk_plugins['plugins'][] = $plugin;
+				}
+				$args = array( 'wpdesk_plugins'           => $wpdesk_plugins,
+				               'wpdesk_installed_plugins' => $wpdesk_installed_plugins,
+				               'wp_plugins'               => $wp_plugins
+				);
+				echo WPDesk_Helper()->loadTemplate( 'wpdesk-page', '', $args );
+			}
+			catch ( Exception $e ) {
+				$args = array(
+					'wpdesk_plugins'            => $e->getMessage(),
+                    'url'                       => trailingslashit($this->upgrade_url).'?wpdesk_api=1&t=1',
+				);
+				echo WPDesk_Helper()->loadTemplate( 'wpdesk-page', '', $args );
+            }
+		}
+
+
+		public function wpdesk_licenses() {
+			global $wpdesk_helper_plugins;
+			if ( ! isset( $wpdesk_helper_plugins ) )
+				$wpdesk_helper_plugins = array();
+
+			if ( isset( $_POST['plugin'] ) ) {
+				$plugin = false;
+				foreach ( $wpdesk_helper_plugins as $plugin_key => $wpdesk_helper_plugin ) {
+					if ( $wpdesk_helper_plugin['plugin'] == $_POST['plugin'] ) {
+						$plugin = $wpdesk_helper_plugin;
+					}
+				}
+				if ( $plugin ) {
+					if ( $_POST['action'] == 'activate' ) {
+						$activation_email = $_POST['activation_email'];
+						$api_key = $_POST['api_key'];
+						$args = array(
+								'email' => $activation_email,
+								'licence_key' => $api_key,
+						);
+
+						$plugin['api_manager']->upgrade_url = $this->upgrade_url_pl;
+						$activate_results = json_decode( $plugin['api_manager']->key()->activate( $args ), true );
+						$activated = false;
+						if ( $activate_results['activated'] === true ) {
+							add_settings_error( 'activate_text', 'activate_msg', __( 'Plugin activated. ', 'wpdesk-helper' ) . "{$activate_results['message']}.", 'updated' );
+							update_option( $plugin['api_manager']->activated_key, 'Activated' );
+
+							$plugin['api_manager']->options[$plugin['api_manager']->api_key] = $api_key;
+							$plugin['api_manager']->options[$plugin['api_manager']->activation_email] = $activation_email;
+							update_option( $plugin['api_manager']->data_key, $plugin['api_manager']->options );
+							$activated = true;
+							update_option( $plugin['api_manager']->upgrade_url_key, $plugin['api_manager']->upgrade_url );
+						}
+						else {
+							$this->upgrade_url = $this->upgrade_url_net;
+							$plugin['api_manager']->upgrade_url = $this->upgrade_url_net;
+
+							$activate_results = json_decode( $plugin['api_manager']->key()->activate( $args ), true );
+							if ( $activate_results['activated'] === true ) {
+								add_settings_error( 'activate_text', 'activate_msg', __( 'Plugin activated. ', 'wpdesk-helper' ) . "{$activate_results['message']}.", 'updated' );
+								update_option( $plugin['api_manager']->activated_key, 'Activated' );
+
+								$plugin['api_manager']->options[$plugin['api_manager']->api_key] = $api_key;
+								$plugin['api_manager']->options[$plugin['api_manager']->activation_email] = $activation_email;
+								update_option( $plugin['api_manager']->data_key, $plugin['api_manager']->options );
+								$activated = true;
+								update_option( $plugin['api_manager']->upgrade_url_key, $plugin['api_manager']->upgrade_url );
+							}
+						}
+
+						if ( $activate_results == false ) {
+							add_settings_error( 'api_key_check_text', 'api_key_check_error', __( 'Connection failed to the License Key API server. Try again later.', 'wpdesk-helper' ), 'error' );
+							$plugin['api_manager']->options[$plugin['api_manager']->api_key] = '';
+							$plugin['api_manager']->options[$plugin['api_manager']->activation_email] = '';
+							update_option( $plugin['api_manager']->data_key, $plugin['api_manager']->options );
+							update_option( $plugin['api_manager']->activated_key, 'Deactivated' );
+						}
+
+						if ( !$activated && isset( $activate_results['code'] ) ) {
+
+							if ( !isset( $activate_results['additional info'] ) ) {
+								$activate_results['additional info'] = '';
+							}
+
+							switch ( $activate_results['code'] ) {
+								case '100':
+									add_settings_error( 'api_email_text', 'api_email_error', "{$activate_results['error']}. {$activate_results['additional info']}", 'error' );
+									$plugin['api_manager']->options[$plugin['api_manager']->activation_email] = '';
+									$plugin['api_manager']->options[$plugin['api_manager']->api_key] = '';
+									update_option( $plugin['api_manager']->data_key, $plugin['api_manager']->options );
+									update_option( $plugin['api_manager']->activated_key, 'Deactivated' );
+									break;
+								case '101':
+									add_settings_error( 'api_key_text', 'api_key_error', "{$activate_results['error']}. {$activate_results['additional info']}", 'error' );
+									$plugin['api_manager']->options[$plugin['api_manager']->activation_email] = '';
+									$plugin['api_manager']->options[$plugin['api_manager']->api_key] = '';
+									update_option( $plugin['api_manager']->data_key, $plugin['api_manager']->options );
+									update_option( $plugin['api_manager']->activated_key, 'Deactivated' );
+									break;
+								case '102':
+									add_settings_error( 'api_key_purchase_incomplete_text', 'api_key_purchase_incomplete_error', "{$activate_results['error']}. {$activate_results['additional info']}", 'error' );
+									$plugin['api_manager']->options[$plugin['api_manager']->activation_email] = '';
+									$plugin['api_manager']->options[$plugin['api_manager']->api_key] = '';
+									update_option( $plugin['api_manager']->data_key, $plugin['api_manager']->options );
+									update_option( $plugin['api_manager']->activated_key, 'Deactivated' );
+									break;
+								case '103':
+									add_settings_error( 'api_key_exceeded_text', 'api_key_exceeded_error', "{$activate_results['error']}. {$activate_results['additional info']}", 'error' );
+									$plugin['a_manager']->options[$plugin['api_manager']->activation_email] = '';
+									$plugin['api_manager']->options[$plugin['api_manager']->api_key] = '';
+									update_option( $plugin['api_manager']->data_key, $plugin['api_manager']->options );
+									update_option( $plugin['api_manager']->activated_key, 'Deactivated' );
+									break;
+								case '104':
+									add_settings_error( 'api_key_not_activated_text', 'api_key_not_activated_error', "{$activate_results['error']}. {$activate_results['additional info']}", 'error' );
+									$plugin['api_manager']->options[$plugin['api_manager']->activation_email] = '';
+									$plugin['api_manager']->options[$plugin['api_manager']->api_key] = '';
+									update_option( $plugin['api_manager']->data_key, $plugin['api_manager']->options );
+									update_option( $plugin['api_manager']->activated_key, 'Deactivated' );
+									break;
+								case '105':
+									add_settings_error( 'api_key_invalid_text', 'api_key_invalid_error', "{$activate_results['error']}. {$activate_results['additional info']}", 'error' );
+									$plugin['api_manager']->options[$plugin['api_manager']->activation_email] = '';
+									$plugin['api_manager']->options[$plugin['api_manager']->api_key] = '';
+									update_option( $plugin['api_manager']->data_key, $plugin['api_manager']->options );
+									update_option( $plugin['api_manager']->activated_key, 'Deactivated' );
+									break;
+								case '106':
+									add_settings_error( 'sub_not_active_text', 'sub_not_active_error', "{$activate_results['error']}. {$activate_results['additional info']}", 'error' );
+									$plugin['api_manager']->options[$plugin['api_manager']->activation_email] = '';
+									$plugin['api_manager']->options[$plugin['api_manager']->api_key] = '';
+									update_option( $plugin['api_manager']->data_key, $plugin['api_manager']->options );
+									update_option( $plugin['api_manager']->activated_key, 'Deactivated' );
+									break;
+							}
+						}
+
+						$this->init();
+
+					}
+
+					if ( $_POST['action'] == 'deactivate' ) {
+
+						$args = array(
+								'email' => $plugin['api_manager']->options[$plugin['api_manager']->activation_email],
+								'licence_key' => $plugin['api_manager']->options[$plugin['api_manager']->api_key],
+						);
+						$activate_results = json_decode( $plugin['api_manager']->key()->deactivate( $args ), true );
+						// Used to display results for development
+						//print_r($activate_results); exit();
+						$deactivated = false;
+						if ( $activate_results['deactivated'] === true ) {
+							$update = array(
+									$plugin['api_manager']->api_key => '',
+									$plugin['api_manager']->activation_email => ''
+							);
+
+							$merge_options = array_merge( $plugin['api_manager']->options, $update );
+
+							update_option( $plugin['api_manager']->data_key, $merge_options );
+
+							update_option( $plugin['api_manager']->activated_key, 'Deactivated' );
+
+							delete_option( $plugin['api_manager']->upgrade_url_key );
+
+							add_settings_error( 'wc_am_deactivate_text', 'deactivate_msg', __( 'Plugin license deactivated. ', 'wpdesk-helper' ) . "{$activate_results['activations_remaining']}.", 'updated' );
+
+							$deactivated = true;
+
+						}
+
+						if ( ! $deactivated && isset( $activate_results['code'] ) ) {
+
+							switch ( $activate_results['code'] ) {
+								case '100':
+									add_settings_error( 'api_email_text', 'api_email_error', "{$activate_results['error']}. {$activate_results['additional info']}", 'error' );
+									$options[$plugin['api_manager']->activation_email] = '';
+									$options[$plugin['api_manager']->api_key] = '';
+									update_option( $plugin['api_manager']->data_key, $plugin['api_manager']->options );
+									update_option( $plugin['api_manager']->activated_key, 'Deactivated' );
+									break;
+								case '101':
+									add_settings_error( 'api_key_text', 'api_key_error', "{$activate_results['error']}. {$activate_results['additional info']}", 'error' );
+									$options[$plugin['api_manager']->api_key] = '';
+									$options[$plugin['api_manager']->activation_email] = '';
+									update_option( $plugin['api_manager']->data_key, $plugin['api_manager']->options );
+									update_option( $plugin['api_manager']->activated_key, 'Deactivated' );
+									break;
+								case '102':
+									add_settings_error( 'api_key_purchase_incomplete_text', 'api_key_purchase_incomplete_error', "{$activate_results['error']}. {$activate_results['additional info']}", 'error' );
+									$options[$plugin['api_manager']->api_key] = '';
+									$options[$plugin['api_manager']->activation_email] = '';
+									update_option( $plugin['api_manager']->data_key, $plugin['api_manager']->options );
+									update_option( $plugin['api_manager']->activated_key, 'Deactivated' );
+									break;
+								case '103':
+									add_settings_error( 'api_key_exceeded_text', 'api_key_exceeded_error', "{$activate_results['error']}. {$activate_results['additional info']}", 'error' );
+									$options[$plugin['api_manager']->api_key] = '';
+									$options[$plugin['api_manager']->activation_email] = '';
+									update_option( $plugin['api_manager']->data_key, $plugin['api_manager']->options );
+									update_option( $plugin['api_manager']->activated_key, 'Deactivated' );
+									break;
+								case '104':
+									add_settings_error( 'api_key_not_activated_text', 'api_key_not_activated_error', "{$activate_results['error']}. {$activate_results['additional info']}", 'error' );
+									$options[$plugin['api_manager']->api_key] = '';
+									$options[$plugin['api_manager']->activation_email] = '';
+									update_option( $plugin['api_manager']->data_key, $plugin['api_manager']->options );
+									update_option( $plugin['api_manager']->activated_key, 'Deactivated' );
+									break;
+								case '105':
+									add_settings_error( 'api_key_invalid_text', 'api_key_invalid_error', "{$activate_results['error']}. {$activate_results['additional info']}", 'error' );
+									$options[$plugin['api_manager']->api_key] = '';
+									$options[$plugin['api_manager']->activation_email] = '';
+									update_option( $plugin['api_manager']->data_key, $plugin['api_manager']->options );
+									update_option( $plugin['api_manager']->activated_key, 'Deactivated' );
+									break;
+								case '106':
+									add_settings_error( 'sub_not_active_text', 'sub_not_active_error', "{$activate_results['error']}. {$activate_results['additional info']}", 'error' );
+									$options[$plugin['api_manager']->api_key] = '';
+									$options[$plugin['api_manager']->activation_email] = '';
+									update_option( $plugin['api_manager']->data_key, $plugin['api_manager']->options );
+									update_option( $plugin['api_manager']->activated_key, 'Deactivated' );
+									break;
+							}
+
+						}
+
+						$this->init();
+					}
+				}
+			}
+
+			require_once('classes/class-wpdesk-helper-list-table.php');
+			$args = array( 'wpdesk_helper_plugins' => $wpdesk_helper_plugins );
+			echo WPDesk_Helper()->loadTemplate( 'licenses' , '', $args );
+		}
+
+		function wpdesk_message() {
+			$options = get_option('wpdesk_helper_options', array() );
+			if ( !is_array( $options ) ) {
+				$options = array();
+			}
+			if ( is_array( $options ) && isset( $options['debug_log'] ) && $options['debug_log'] == '1' ) {
+				if ( ! file_exists( WP_CONTENT_DIR . '/uploads/wpdesk-logs/' )
+					|| ! is_writeable( WP_CONTENT_DIR . '/uploads/wpdesk-logs/' )
+					|| ( file_exists( WP_CONTENT_DIR . '/uploads/wpdesk-logs/wpdesk_debug.log') && ! is_writeable( WP_CONTENT_DIR . '/uploads/wpdesk-logs/wpdesk_debug.log' ) )
+				) {
+				?>
+  	  				<div class="error notice">
+    	    			<p><?php echo sprintf( __( 'Can not enable WP Desk Debug log! Cannot create directory %s or this directory is not writeable!', 'wpdesk-helper' ), WP_CONTENT_DIR . '/uploads/wpdesk-logs/' ); ?></p>
+    				</div>
+    			<?php
+				}
+				else {
+					?>
+	  	  			<div class="updated notice">
+	    	    		<p><?php echo sprintf( __( 'WP Desk Debug Log is enabled. %sPlease disable it after testing%s.', 'wpdesk-helper' ), '<a href="' . admin_url( 'admin.php?page=wpdesk-helper-settings' ) . '">', '</a>' ); ?></p>
+	    			</div>
+	    			<?php
+				}
+			}
+			$currentScreen = get_current_screen();
+			if ($currentScreen->id == 'toplevel_page_wpdesk-helper') {
+			    try {
+				    $wpdesk_data = $this->wpdesk_api_get_plugins();
+			    }
+			    catch ( Exception $e ) {
+				    $wpdesk_data = array();
+                }
+				if ( isset($wpdesk_data['message']) && $wpdesk_data['message'] != '' ) {
+					$wpdesk_api_message_close = get_option('wpdesk_api_message_close','0');
+					if (md5($wpdesk_data['message']) != $wpdesk_api_message_close) {
+						?>
+		  	  			<div id="wpdesk-dismiss" class="updated notice is-dismissible">
+		    	    		<p><?php echo $wpdesk_data['message']; ?></p>
+		    	    		<span id="wpdesk-api-ajax-notification-nonce" class="hidden"><?php echo wp_create_nonce( 'wpdesk-api-ajax-notification-nonce' ); ?></span>
+		    			</div>
+		    			<script type="text/javascript">
+		    				jQuery( document ).ready( function() {
+		    					jQuery('#wpdesk-dismiss.is-dismissible').on('click', '.notice-dismiss', function(event) {
+										jQuery.post(ajaxurl, {
+		                    				action: 'wpdesk_api_hide_message',
+		                    				nonce: jQuery.trim(jQuery('#wpdesk-api-ajax-notification-nonce').text()),
+		                    				value: '<?php echo md5($wpdesk_data['message']); ?>'
+		                 				},
+		                 				function (response) {
+			                 				if ( response == 1 ) {
+			                 				}
+		                				});
+										jQuery('#wpdesk_helper_message_counter').css('display','none');
+		    					});
+		    				});
+		   				</script>
+		   				<?php
+					}
+				}
+			}
+
+		}
+
+		function api_hide_message() {
+			if ( wp_verify_nonce( $_REQUEST['nonce'], 'wpdesk-api-ajax-notification-nonce' ) ) {
+				if	( update_option( 'wpdesk_api_message_close', $_REQUEST['value'] ) ) {
+					die( '1' );
+				}
+				else {
+					die( '0' );
+				}
+			}
+		}
+
+		function admin_head() {
+			?>
+				<style>
+					li.wp-first-item .wpdesk-update-plugins {
+		    		display: none !important;
+					}
+				</style>
+			<?php
+		}
+
+		public function wpdesk_helper_updater() {
+			global $wpdesk_helper_software_version;
+			require_once( 'classes/class-wc-plugin-update.php' );
+			$this->updater =  new WPDesk_Update_API_Check(
+															null,
+															$this->upgrade_url,
+															'wpdesk-helper/wpdesk-helper.php',
+															'WPDesk Helper',
+															$api_key = null,
+															$activation_email = null,
+															$renew_license_url = null,
+															$instance = null,
+															$domain = null,
+															$wpdesk_helper_software_version,
+															$plugin_or_theme = 'plugin',
+															$text_domain = null,
+															$extra = null,
+															$free = true
+														);
+		}
+
+		// Loads admin style sheets
+		public function css_scripts() {
+			$screen = get_current_screen();
+			if ( $screen->base == 'toplevel_page_wpdesk-helper' || $screen->base == 'wp-desk_page_wpdesk-licenses' || $screen->base == 'wp-desk-1_page_wpdesk-licenses' ) {
+				wp_register_style( 'wpdesk-helper', plugins_url( 'wpdesk-helper/assets/css/admin-settings.css' ) , array(), $this->script_version, 'all' );
+				wp_enqueue_style( 'wpdesk-helper' );
+			}
+		}
+
+		public static function wpdesk_tracker_notice_screens( $screens ) {
+			$screens[] = 'toplevel_page_wpdesk-helper';
+			$screens[] = 'wp-desk_page_wpdesk-licenses';
+			$screens[] = 'wp-desk_page_wpdesk-helper-settings';
+			return $screens;
+		}
+	}
+
+	function WPDesk_Helper() {
+		return WPDesk_Helper::WPDesk_Helper();
+	}
+
+endif;
+
+add_action( 'plugins_loaded', 'wpdesk_helper_init', 1 );
+
+add_action( 'activated_plugin', 'wpdesk_helper_activated_plugin', 10, 2 );
+if ( !function_exists( 'wpdesk_helper_activated_plugin' ) ) {
+	function wpdesk_helper_activated_plugin( $plugin, $network_wide ) {
+		if ( wpdesk_tracker_enabled() && !apply_filters( 'wpdesk_tracker_do_not_ask', false ) ) {
+			if ( $plugin == 'wpdesk-helper/wpdesk-helper.php' ) {
+				$options = get_option( 'wpdesk_helper_options', array() );
+				if ( empty( $options ) ) {
+					$options = array();
+				}
+				if ( empty( $options['wpdesk_tracker_agree'] ) ) {
+					$options['wpdesk_tracker_agree'] = '0';
+				}
+				$wpdesk_tracker_skip_plugin = get_option( 'wpdesk_tracker_skip_wpdesk_helper', '0' );
+				if ( $options['wpdesk_tracker_agree'] == '0' && $wpdesk_tracker_skip_plugin == '0' ) {
+					update_option( 'wpdesk_tracker_notice', '1' );
+					update_option( 'wpdesk_tracker_skip_wpdesk_helper', '1' );
+					wp_redirect( admin_url( 'admin.php?page=wpdesk_tracker&plugin=wpdesk-helper/wpdesk-helper.php' ) );
+					exit;
+				}
+			}
+		}
+	}
+}
+
+if ( !function_exists( 'wpdesk_activated_plugin_activation_date' ) ) {
+	function wpdesk_activated_plugin_activation_date( $plugin, $network_wide ) {
+	    $option_name = 'plugin_activation_' . $plugin;
+	    $activation_date = get_option( $option_name, '' );
+	    if ( $activation_date == '' ) {
+	        $activation_date = current_time( 'mysql' );
+	        update_option( $option_name, $activation_date );
+        }
+	}
+	add_action( 'activated_plugin', 'wpdesk_activated_plugin_activation_date', 10, 2 );
+}
+
+if ( !function_exists( 'wpdesk_helper_init' ) ) {
+	function wpdesk_helper_init() {
+        WPDesk_Tracker::init( basename( dirname( __FILE__ ) ) );
+
+		WPDesk_Helper();
+		$options = get_option( 'wpdesk_helper_options', array() );
+		if ( ! is_array( $options ) ) {
+			$options = array();
+		}
+		if ( is_array( $options ) && isset( $options['debug_log'] ) && $options['debug_log'] == '1' ) {
+			if ( is_writeable( WP_CONTENT_DIR . '/uploads/' ) && ! file_exists( WP_CONTENT_DIR . '/uploads/wpdesk-logs/' ) ) {
+				mkdir( WP_CONTENT_DIR . '/uploads/wpdesk-logs', 0777, true );
+			}
+			if ( file_exists( WP_CONTENT_DIR . '/uploads/wpdesk-logs/' ) ) {
+				if ( is_writeable( WP_CONTENT_DIR . '/uploads/wpdesk-logs/' ) && ! file_exists( WP_CONTENT_DIR . '/uploads/wpdesk-logs/index.html' ) ) {
+					$index_html = fopen( WP_CONTENT_DIR . '/uploads/wpdesk-logs/index.html', 'w' );
+					fclose( $index_html );
+				}
+			}
+			if ( file_exists( WP_CONTENT_DIR . '/uploads/wpdesk-logs/' ) && is_writeable( WP_CONTENT_DIR . '/uploads/wpdesk-logs/' ) ) {
+				ini_set( 'log_errors', 1 );
+				ini_set( 'error_log', WP_CONTENT_DIR . '/uploads/wpdesk-logs/wpdesk_debug.log' );
+			}
+		}
+	}
+}
